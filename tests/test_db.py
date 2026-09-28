@@ -1,6 +1,6 @@
 import asyncpg
 
-from tower_bot.core.db import apply_migrations
+from tower_bot.core.db import apply_migrations, create_pool
 
 
 async def test_migrations_idempotent(db_url: str) -> None:
@@ -31,3 +31,20 @@ async def test_pool_fixture_is_clean(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as c:
         await c.execute("insert into games(name, name_norm) values('A','a')")
         assert await c.fetchval("select count(*) from games") == 1
+
+
+async def test_create_pool_with_password(db_url: str) -> None:
+    # Parse user/password from db_url: postgresql://postgres:postgres@host:port/db
+    # Strip password and pass it separately to create_pool
+    parts = db_url.split("://", 1)[1]  # Remove scheme
+    user_pass, host_db = parts.split("@", 1)
+    user = user_pass.split(":")[0]
+    # Reconstruct URL without password
+    url_without_password = f"postgresql://{user}@{host_db}"
+    # Call create_pool with password parameter
+    p = await create_pool(url_without_password, "postgres")
+    try:
+        async with p.acquire() as c:
+            assert await c.fetchval("select 1") == 1
+    finally:
+        await p.close()

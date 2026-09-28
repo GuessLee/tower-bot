@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Iterator
 import asyncpg
 import pytest
 
-from tower_bot.core.db import apply_migrations
+from tower_bot.core.db import apply_migrations, create_pool
 
 BASE = os.environ.get("TEST_DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/postgres")
 TABLES = "games, nights, night_candidates, polls, poll_options, pins, audit_log, feedback_outbox"
@@ -37,7 +37,7 @@ def db_url() -> Iterator[str]:
 
 @pytest.fixture
 async def pool(db_url: str) -> AsyncIterator[asyncpg.Pool]:
-    p = await asyncpg.create_pool(db_url, min_size=1, max_size=4)
+    p = await create_pool(db_url, None)
     async with p.acquire() as c:
         await c.execute(f"truncate {TABLES} restart identity cascade")
     yield p
