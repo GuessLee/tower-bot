@@ -97,13 +97,21 @@ def test_library_card_truncates() -> None:
 
 
 def test_night_card_long_note_capped_to_description_limit() -> None:
-    # A Discord modal paragraph input can carry up to 4000 chars; the note alone,
-    # plus the fixed instructional text, must never push the embed past Discord's
-    # 4096-char description limit.
-    huge_note = "n" * 4000
-    e = render.night_card(replace(NIGHT, note=huge_note), CANDS, EMPTY_TALLY, None, TZ)
-    assert len(e.description) <= 4096
-    assert huge_note[:100] in e.description  # still shows the note, just capped overall
+    # A Discord modal paragraph input can carry up to 4000 chars, but the fixed
+    # instructional/playing text on top of that means even a note within that
+    # limit isn't guaranteed to fit. Use 5000 chars, long enough to overflow the
+    # 4096 description limit on its own, so this actually exercises the cap
+    # instead of passing by coincidence. Covers both the open and locked branches.
+    huge_note = "n" * 5000
+    open_card = render.night_card(replace(NIGHT, note=huge_note), CANDS, EMPTY_TALLY, None, TZ)
+    assert len(open_card.description) <= 4096
+    assert huge_note[:100] in open_card.description  # still shows the note, just capped overall
+
+    locked_night = replace(NIGHT, status="locked", note=huge_note)
+    chosen = Candidate(1, "1️⃣", Game(9, "X" * 80, None, START, None, 0, True))
+    locked_card = render.night_card(locked_night, CANDS, EMPTY_TALLY, chosen, TZ)
+    assert len(locked_card.description) <= 4096
+    assert huge_note[:100] in locked_card.description
 
 
 def test_night_card_long_game_vote_field_capped_to_field_limit() -> None:
