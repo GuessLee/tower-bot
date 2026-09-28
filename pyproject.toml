@@ -1,0 +1,41 @@
+[project]
+name = "tower-bot"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "discord.py>=2.4,<3",
+  "asyncpg>=0.29",
+  "httpx>=0.27",
+  "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "mypy>=1.11", "asyncpg-stubs>=0.29"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tower_bot*"]
+
+[tool.setuptools.package-data]
+tower_bot = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["e2e: needs real Discord staging guild + tokens"]
+addopts = "-m 'not e2e'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+disallow_untyped_decorators = false
