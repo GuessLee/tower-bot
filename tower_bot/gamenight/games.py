@@ -49,22 +49,33 @@ async def suggest(
         raise ValueError("Game names need at least one letter or number.")
     row = await conn.fetchrow("select * from games where name_norm=$1", norm)
     if row is not None:
-        if row["active"]:
-            return Exists(Game.from_row(row))
-        row = await conn.fetchrow("update games set active=true where id=$1 returning *", row["id"])
-        return Added(Game.from_row(row))
+        return await _existing_or_reactivated(conn, row)
     if not force:
         for r in await conn.fetch("select * from games where active"):
             if SequenceMatcher(None, norm, r["name_norm"]).ratio() >= FUZZY:
                 return PossibleDuplicate(Game.from_row(r))
     row = await conn.fetchrow(
-        "insert into games(name,name_norm,suggested_by,source) values($1,$2,$3,$4) returning *",
+        "insert into games(name,name_norm,suggested_by,source) values($1,$2,$3,$4) "
+        "on conflict (name_norm) do nothing returning *",
         clean,
         norm,
         by,
         source,
     )
+    if row is None:
+        # Lost a race: another concurrent suggest() inserted this name_norm first.
+        row = await conn.fetchrow("select * from games where name_norm=$1", norm)
+        assert row is not None
+        return await _existing_or_reactivated(conn, row)
     return Added(Game.from_row(row))
+
+
+async def _existing_or_reactivated(conn: asyncpg.Connection, row: asyncpg.Record) -> Exists | Added:
+    if row["active"]:
+        return Exists(Game.from_row(row))
+    updated = await conn.fetchrow("update games set active=true where id=$1 returning *", row["id"])
+    assert updated is not None
+    return Added(Game.from_row(updated))
 
 
 async def list_active(conn: asyncpg.Connection) -> list[Game]:

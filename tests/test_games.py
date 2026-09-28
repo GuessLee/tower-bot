@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
@@ -72,6 +73,21 @@ async def test_pick_candidates_order(pool: asyncpg.Pool) -> None:
             "Old Never Played",
             "Old Played Long Ago",
         ]
+
+
+async def test_concurrent_same_suggestion(pool: asyncpg.Pool) -> None:
+    conns = [await pool.acquire() for _ in range(5)]
+    try:
+        results = await asyncio.gather(
+            *(games.suggest(c, "Among Us", i) for i, c in enumerate(conns))
+        )
+    finally:
+        for c in conns:
+            await pool.release(c)
+    added = [r for r in results if isinstance(r, Added)]
+    exists = [r for r in results if isinstance(r, Exists)]
+    assert len(added) == 1
+    assert len(exists) == 4
 
 
 async def test_record_played(pool: asyncpg.Pool) -> None:
