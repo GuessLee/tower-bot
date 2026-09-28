@@ -30,7 +30,10 @@ class Config:
 def _get(env: Mapping[str, str], key: str) -> str | None:
     path = env.get(f"{key}_FILE")
     if path:
-        return Path(path).read_text().strip()
+        try:
+            return Path(path).read_text().strip()
+        except OSError as e:
+            raise ConfigError(f"{key}_FILE: cannot read {path}: {e.strerror or e}") from e
     val = env.get(key)
     return val.strip() if val else None
 

@@ -57,3 +57,10 @@ def test_labels_and_textfile() -> None:
     )
     assert c.feedback_labels == ("feedback", "e2e-test")
     assert c.textfile_path == Path("/textfile/tower_bot.prom")
+
+
+def test_unreadable_secret_file(tmp_path: Path) -> None:
+    nonexistent = tmp_path / "nonexistent"
+    env = {**BASE, "DISCORD_TOKEN_FILE": str(nonexistent)}
+    with pytest.raises(ConfigError, match="DISCORD_TOKEN_FILE"):
+        load_config(env)
