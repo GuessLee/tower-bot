@@ -57,6 +57,7 @@ class FakeGateway:
         self._msg(message_id).embed = embed
 
     async def add_reactions(self, channel_id: int, message_id: int, emojis: Sequence[str]) -> None:
+        self._maybe_fail("add_reactions")
         m = self._msg(message_id)
         for e in emojis:
             m.reactions.setdefault(e, set())
@@ -74,6 +75,7 @@ class FakeGateway:
         return mid
 
     async def pin(self, channel_id: int, message_id: int) -> None:
+        self._maybe_fail("pin")
         self._msg(message_id)
         self.pinned.add(message_id)
 
@@ -93,11 +95,13 @@ class FakeGateway:
     async def edit_event(
         self, guild_id: int, event_id: int, starts_at: datetime, ends_at: datetime, description: str
     ) -> None:
+        self._maybe_fail("edit_event")
         if event_id not in self.events:
             raise MessageGone()
         self.events[event_id].update(starts_at=starts_at, ends_at=ends_at, description=description)
 
     async def delete_event(self, guild_id: int, event_id: int) -> None:
+        self._maybe_fail("delete_event")
         if self.events.pop(event_id, None) is None:
             raise MessageGone()
 
