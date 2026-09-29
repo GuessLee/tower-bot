@@ -206,7 +206,12 @@ class GameNightService:
         await self._mark_card_deleted(night)
         await self.refresh_next_up()
 
-    async def refresh_night(self, night_id: int) -> None:
+    async def refresh_night(self, night_id: int, *, refresh_pin: bool = True) -> None:
+        """Re-render one night's card. refresh_pin=False skips touching the
+        next-up pin (both on success and on a deleted card); catch_up() uses
+        this from its own loop so many nights refreshed in one sweep still
+        only trigger a single pin refresh, done once after the whole loop via
+        ensure_pins(), instead of once per night here."""
         night, cands = await self._load(night_id)
         if night.message_id is None:
             return
@@ -222,9 +227,12 @@ class GameNightService:
             await self._call("edit night card", lambda: self.gw.edit(night.channel_id, mid, card))
         except MessageGone:
             if night.status != "cancelled":
-                await self._card_deleted(night)
+                if refresh_pin:
+                    await self._card_deleted(night)
+                else:
+                    await self._mark_card_deleted(night)
             return
-        if night.status == "open":
+        if refresh_pin and night.status == "open":
             await self.refresh_next_up()
 
     async def refresh_message(self, message_id: int) -> None:
@@ -341,7 +349,10 @@ class GameNightService:
                 )
             except (MessageGone, TransientGatewayError):
                 pass
-        await self.refresh_night(night.id)
+        try:
+            await self.refresh_night(night.id)
+        except TransientGatewayError:
+            pass  # already logged; the move already happened, do not abort on this
         if night.message_id is not None:
             mid = night.message_id
             try:
@@ -365,11 +376,17 @@ class GameNightService:
             night = await repo.update_night(c, night.id, status="cancelled")
             await audit(c, actor_id, "night_cancel", f"night:{night.id}")
         if night.event_id is not None:
+            eid = night.event_id
             try:
-                await self.gw.delete_event(self.settings.guild_id, night.event_id)
+                await self._call(
+                    "delete event", lambda: self.gw.delete_event(self.settings.guild_id, eid)
+                )
             except (MessageGone, TransientGatewayError):
                 pass
-        await self.refresh_night(night.id)
+        try:
+            await self.refresh_night(night.id)
+        except TransientGatewayError:
+            pass  # already logged; the cancel already happened, do not abort on this
         if night.message_id is not None:
             mid = night.message_id
             try:
@@ -401,7 +418,10 @@ class GameNightService:
         async with self._acquire() as c:
             await repo.update_night(c, night.id, chosen_game_id=pick.game.id, chosen_override=True)
             await audit(c, actor_id, "night_override", f"night:{night.id}", game=pick.game.name)
-        await self.refresh_night(night.id)
+        try:
+            await self.refresh_night(night.id)
+        except TransientGatewayError:
+            pass  # already logged; the override already happened, do not abort on this
         return pick
 
     async def due_locks(self, now: datetime) -> list[Night]:
@@ -426,9 +446,12 @@ class GameNightService:
         else:
             chosen = choose_winner(t, cands)
         async with self._acquire() as c, c.transaction():
-            await repo.update_night(
-                c, night.id, status="locked", chosen_game_id=chosen.game.id if chosen else None
-            )
+            locked = await repo.lock_night_if_open(c, night.id, chosen.game.id if chosen else None)
+            if locked is None:
+                # A concurrent cancel/move already changed the status; do not
+                # overwrite it, and do not record a play or audit row for a
+                # lock that lost the race.
+                return None
             if chosen is not None:
                 await games.record_played(c, chosen.game.id, night.starts_at)
             await audit(
@@ -439,7 +462,10 @@ class GameNightService:
                 game=chosen.game.name if chosen else None,
                 votes=t.votes,
             )
-        await self.refresh_night(night.id)
+        try:
+            await self.refresh_night(night.id)
+        except TransientGatewayError:
+            pass  # already logged; the lock already happened, do not abort on this
         text = (
             f"🔒 Game locked: **{chosen.game.name}**. Have fun!"
             if chosen
@@ -466,6 +492,16 @@ class GameNightService:
                 snap = await self._call(
                     "read reactions", partial(self.gw.reactions, night.channel_id, mid)
                 )
+                t = tally(snap, cands)
+                people = [*t.going, *t.maybe]
+                when = "tomorrow" if kind == "24h" else "in 1 hour"
+                who = (
+                    render.mentions(people) if people else "Nobody's in yet, react ✅ on the card."
+                )
+                text = (
+                    f"⏰ Game night {when} ({fmt_when(night.starts_at, self.settings.tz)})! {who}"
+                )
+                await self._call("reminder", partial(self.gw.reply, night.channel_id, mid, text))
             except MessageGone:
                 # _mark_card_deleted only (no refresh here): many nights can be
                 # due at once, and we only want one pin refresh for the whole
@@ -473,12 +509,11 @@ class GameNightService:
                 await self._mark_card_deleted(night)
                 any_deleted = True
                 continue
-            t = tally(snap, cands)
-            people = [*t.going, *t.maybe]
-            when = "tomorrow" if kind == "24h" else "in 1 hour"
-            who = render.mentions(people) if people else "Nobody's in yet, react ✅ on the card."
-            text = f"⏰ Game night {when} ({fmt_when(night.starts_at, self.settings.tz)})! {who}"
-            await self._call("reminder", partial(self.gw.reply, night.channel_id, mid, text))
+            except TransientGatewayError:
+                # Already logged by _call. Do not mark this night as reminded:
+                # one bad night must not block the rest of the sweep, and the
+                # unset flags mean the next tick will simply try again.
+                continue
             flags = (
                 {"reminded_24h": True, "reminded_1h": True}
                 if kind == "1h"
@@ -536,8 +571,9 @@ class GameNightService:
             card = render.poll_card(poll, poll_counts(snap, poll.options), self.settings.tz)
             await self._call("edit poll", lambda: self.gw.edit(poll.channel_id, mid, card))
         except MessageGone:
-            async with self._acquire() as c:
-                await repo.update_poll(c, poll.id, status="cancelled")
+            if poll.status == "open":
+                async with self._acquire() as c:
+                    await repo.update_poll(c, poll.id, status="cancelled")
 
     async def pick_poll(
         self,
@@ -560,11 +596,23 @@ class GameNightService:
         opt = next((o for o in poll.options if o.position == position), None)
         if opt is None:
             raise InvalidState(f"Poll #{poll.id} has no option {position}.")
-        night = await self.create_night(
-            poll.poster_id, opt.starts_at, note=f"Picked from poll #{poll.id}"
-        )
+        # Claim the poll atomically before creating a night: two concurrent
+        # pick_poll calls both pass the checks above, but only one of them can
+        # win this conditional update, so only one night is ever created.
         async with self._acquire() as c:
-            await repo.update_poll(c, poll.id, status="picked", night_id=night.id)
+            claimed = await repo.claim_poll(c, poll.id)
+        if claimed is None:
+            raise InvalidState(f"Poll #{poll.id} is no longer open.")
+        try:
+            night = await self.create_night(
+                poll.poster_id, opt.starts_at, note=f"Picked from poll #{poll.id}"
+            )
+        except Exception:
+            async with self._acquire() as c:
+                await repo.update_poll(c, poll.id, status="open")
+            raise
+        async with self._acquire() as c:
+            await repo.update_poll(c, poll.id, night_id=night.id)
             await audit(c, actor_id, "poll_pick", f"poll:{poll.id}", night=night.id)
         await self.refresh_poll(poll.id)
         if poll.message_id is not None and night.message_id is not None:
@@ -583,33 +631,13 @@ class GameNightService:
         return night
 
     # --- startup -----------------------------------------------------------
-    async def _catch_up_night(self, night: Night) -> None:
-        """Re-render one night's card after downtime, without touching the
-        next-up pin. catch_up() refreshes that pin once via ensure_pins()
-        after its whole loop runs, instead of once per night here."""
-        if night.message_id is None:
-            return
-        mid = night.message_id
-        async with self._acquire() as c:
-            cands = await repo.candidates(c, night.id)
-        try:
-            snap = await self._call(
-                "read reactions", partial(self.gw.reactions, night.channel_id, mid)
-            )
-        except MessageGone:
-            await self._mark_card_deleted(night)
-            return
-        t = tally(snap, cands)
-        card = render.night_card(night, cands, t, self._chosen(night, cands, t), self.settings.tz)
-        await self._call("edit night card", partial(self.gw.edit, night.channel_id, mid, card))
-
     async def catch_up(self) -> None:
         async with self._acquire() as c:
             nights = await repo.open_nights(c)
             polls = await repo.open_polls(c)
         for n in nights:
             try:
-                await self._catch_up_night(n)
+                await self.refresh_night(n.id, refresh_pin=False)
             except Exception as e:  # keep going; one bad card must not block the rest
                 await self.log_error(f"catch-up night #{n.id}: {e!r}")
         for p in polls:

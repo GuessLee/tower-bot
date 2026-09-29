@@ -74,6 +74,22 @@ async def update_night(c: asyncpg.Connection, night_id: int, **fields: Any) -> N
     return Night.from_row(r)
 
 
+async def lock_night_if_open(
+    c: asyncpg.Connection, night_id: int, chosen_game_id: int | None
+) -> Night | None:
+    """Lock a night only if it is still 'open'. Returns None (no row touched)
+    if a concurrent cancel/move already changed its status, so the caller
+    knows not to record a play or write an audit row for a lock that lost
+    the race."""
+    r = await c.fetchrow(
+        "update nights set status='locked', chosen_game_id=$2"
+        " where id=$1 and status='open' returning *",
+        night_id,
+        chosen_game_id,
+    )
+    return Night.from_row(r) if r else None
+
+
 async def insert_candidates(
     c: asyncpg.Connection, night_id: int, cands: Sequence[Candidate]
 ) -> None:
@@ -204,6 +220,16 @@ async def update_poll(c: asyncpg.Connection, poll_id: int, **fields: Any) -> Pol
     clause, vals = _set_clause(fields, _POLL_FIELDS)
     r = await c.fetchrow(f"update polls set {clause} where id=$1 returning *", poll_id, *vals)
     return await _poll_from_row(c, r)
+
+
+async def claim_poll(c: asyncpg.Connection, poll_id: int) -> Poll | None:
+    """Atomically move a poll from 'open' to 'picked'. Returns None (no row
+    touched) if it was already picked or cancelled by a concurrent call, so
+    only one of two racing pick_poll() calls can ever create a night."""
+    r = await c.fetchrow(
+        "update polls set status='picked' where id=$1 and status='open' returning *", poll_id
+    )
+    return await _poll_from_row(c, r) if r else None
 
 
 async def get_pin(c: asyncpg.Connection, kind: str) -> tuple[int, int] | None:

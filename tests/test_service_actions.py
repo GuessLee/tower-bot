@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -202,3 +203,113 @@ async def test_catch_up_applies_reactions_made_while_down(env) -> None:  # type:
     await svc.catch_up()
     card = gw.messages[n.message_id].embed
     assert card is not None and any(f.name == "✅ In (1)" for f in card.fields)
+
+
+# --- fix round 1 (review findings) ------------------------------------------
+
+
+async def test_cancel_survives_card_edit_failure(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    n = await svc.create_night(42, NOW + timedelta(days=2))
+    gw.fail_next("edit", times=3)
+    await svc.cancel_night(42, [], n.id)  # must not raise: the cancel already committed
+    async with pool.acquire() as c:
+        status = await c.fetchval("select status from nights where id=$1", n.id)
+    assert status == "cancelled"
+    assert any(m.channel_id == 400 for m in gw.messages.values())  # #bot-log got a post
+
+
+async def test_lock_survives_card_edit_failure(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, clock = env
+    n = await svc.create_night(42, NOW + timedelta(days=2))
+    gw.react(n.message_id, "1️⃣", 5)
+    clock.set(n.starts_at)
+    gw.fail_next("edit", times=3)
+    chosen = await svc.lock_night(n.id)  # must not raise: the lock already committed
+    assert chosen is not None
+    async with pool.acquire() as c:
+        status = await c.fetchval("select status from nights where id=$1", n.id)
+    assert status == "locked"
+    assert any(m.channel_id == 400 for m in gw.messages.values())  # #bot-log got a post
+
+
+async def test_cancel_survives_delete_event_failure(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    n = await svc.create_night(42, NOW + timedelta(days=2))
+    gw.fail_next("delete_event", times=3)
+    await svc.cancel_night(42, [], n.id)  # must not raise: the cancel already committed
+    async with pool.acquire() as c:
+        status = await c.fetchval("select status from nights where id=$1", n.id)
+    assert status == "cancelled"
+    assert any(m.channel_id == 400 for m in gw.messages.values())  # #bot-log got a post
+
+
+async def test_lock_skips_if_night_no_longer_open(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, clock = env
+    n = await svc.create_night(42, NOW + timedelta(days=2))
+    gw.react(n.message_id, "1️⃣", 5)
+    clock.set(n.starts_at)
+    real_reactions = gw.reactions
+
+    async def sneaky_reactions(channel_id: int, message_id: int):  # type: ignore[no-untyped-def]
+        # Simulate a concurrent cancel that lands after lock_night has already
+        # read reactions but before its own transaction commits.
+        async with pool.acquire() as c:
+            await c.execute("update nights set status='cancelled' where id=$1", n.id)
+        return await real_reactions(channel_id, message_id)
+
+    gw.reactions = sneaky_reactions  # type: ignore[method-assign]
+
+    chosen = await svc.lock_night(n.id)
+    assert chosen is None
+    async with pool.acquire() as c:
+        status = await c.fetchval("select status from nights where id=$1", n.id)
+        played = await c.fetchval("select coalesce(sum(times_played), 0) from games")
+    assert status == "cancelled"  # the concurrent cancel wins, lock does not overwrite it
+    assert played == 0
+
+
+async def test_reminder_failure_does_not_abort_the_sweep(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, clock = env
+    n1 = await svc.create_night(42, NOW + timedelta(days=2))
+    n2 = await svc.create_night(43, NOW + timedelta(days=2, minutes=5))
+    clock.set(n2.starts_at - timedelta(hours=24))  # both nights are due for the 24h reminder
+    gw.fail_next("reply", times=3)  # exhausts n1's reminder retries
+    assert await svc.send_due_reminders(clock.now()) == 1  # only n2 got through
+    async with pool.acquire() as c:
+        f1 = await c.fetchrow("select reminded_24h, reminded_1h from nights where id=$1", n1.id)
+        f2 = await c.fetchrow("select reminded_24h, reminded_1h from nights where id=$1", n2.id)
+    assert not f1["reminded_24h"] and not f1["reminded_1h"]  # retried next tick
+    assert f2["reminded_24h"] and not f2["reminded_1h"]
+    assert "tomorrow" in gw.replies[-1][1]
+
+
+async def test_pick_poll_is_race_safe(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    t1 = NOW + timedelta(days=1)
+    t2 = NOW + timedelta(days=2)
+    poll = await svc.create_poll(42, [t1, t2])
+    results = await asyncio.gather(
+        svc.pick_poll(42, [], 1, poll.id),
+        svc.pick_poll(42, [], 1, poll.id),
+        return_exceptions=True,
+    )
+    errors = [r for r in results if isinstance(r, BaseException)]
+    oks = [r for r in results if not isinstance(r, BaseException)]
+    assert len(oks) == 1
+    assert len(errors) == 1 and isinstance(errors[0], InvalidState)
+    async with pool.acquire() as c:
+        assert await c.fetchval("select count(*) from nights") == 1
+
+
+async def test_refresh_poll_does_not_overwrite_picked_status(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    t1 = NOW + timedelta(days=1)
+    t2 = NOW + timedelta(days=2)
+    poll = await svc.create_poll(42, [t1, t2])
+    await svc.pick_poll(42, [], 1, poll.id)
+    gw.delete(poll.message_id)
+    await svc.refresh_poll(poll.id)
+    async with pool.acquire() as c:
+        status = await c.fetchval("select status from polls where id=$1", poll.id)
+    assert status == "picked"
