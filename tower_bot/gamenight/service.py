@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TypeVar, cast
 from zoneinfo import ZoneInfo
 
@@ -159,12 +160,15 @@ class GameNightService:
             raise
         async with self._acquire() as c:
             night = await repo.update_night(c, night.id, message_id=msg)
-        await self._call(
-            "add reactions",
-            lambda: self.gw.add_reactions(
-                s.night_channel_id, msg, [*RSVP_EMOJIS, *(x.emoji for x in cands)]
-            ),
-        )
+        try:
+            await self._call(
+                "add reactions",
+                lambda: self.gw.add_reactions(
+                    s.night_channel_id, msg, [*RSVP_EMOJIS, *(x.emoji for x in cands)]
+                ),
+            )
+        except TransientGatewayError:
+            pass  # already logged; the card still works without reactions
         try:
             desc = f"{note}\n{self.link(msg)}" if note else self.link(msg)
             event_id = await self._call(
@@ -184,7 +188,10 @@ class GameNightService:
         await self.refresh_next_up()
         return night
 
-    async def _card_deleted(self, night: Night) -> None:
+    async def _mark_card_deleted(self, night: Night) -> None:
+        """Cancel a night whose Discord card is gone. Does not refresh any pin;
+        callers that need one refreshed call refresh_next_up() themselves, once,
+        after this returns (see _card_deleted and refresh_next_up's own loop)."""
         async with self._acquire() as c:
             await repo.update_night(c, night.id, status="cancelled")
             await audit(c, None, "night_card_deleted", f"night:{night.id}")
@@ -194,6 +201,9 @@ class GameNightService:
             except (MessageGone, TransientGatewayError):
                 pass
         await self.log_error(f"Night #{night.id} card was deleted in Discord; marked cancelled.")
+
+    async def _card_deleted(self, night: Night) -> None:
+        await self._mark_card_deleted(night)
         await self.refresh_next_up()
 
     async def refresh_night(self, night_id: int) -> None:
@@ -242,24 +252,29 @@ class GameNightService:
             await repo.upsert_pin(c, kind, channel_id, mid)
 
     async def refresh_next_up(self) -> None:
-        async with self._acquire() as c:
-            night = await repo.next_open(c, self.clock.now())
-            cands = await repo.candidates(c, night.id) if night else []
-        t, chosen, link = EMPTY_TALLY, None, None
-        if night is not None and night.message_id is not None:
-            mid = night.message_id
-            try:
-                snap = await self._call(
-                    "read reactions", lambda: self.gw.reactions(night.channel_id, mid)
-                )
-            except MessageGone:
-                await self._card_deleted(night)  # re-enters refresh_next_up with this night gone
-                return
-            t = tally(snap, cands)
-            chosen = self._chosen(night, cands, t)
-            link = self.link(mid)
-        card = render.next_up_card(night, cands, t, chosen, self.settings.tz, link)
-        await self._upsert_pin("next_up", self.settings.night_channel_id, card)
+        # Loop instead of recursing through _card_deleted: each deleted card we find
+        # is cancelled in place and we move on to the next candidate night, so this
+        # stays one stack frame regardless of how many cards were deleted.
+        while True:
+            async with self._acquire() as c:
+                night = await repo.next_open(c, self.clock.now())
+                cands = await repo.candidates(c, night.id) if night else []
+            t, chosen, link = EMPTY_TALLY, None, None
+            if night is not None and night.message_id is not None:
+                mid = night.message_id
+                try:
+                    snap = await self._call(
+                        "read reactions", partial(self.gw.reactions, night.channel_id, mid)
+                    )
+                except MessageGone:
+                    await self._mark_card_deleted(night)
+                    continue
+                t = tally(snap, cands)
+                chosen = self._chosen(night, cands, t)
+                link = self.link(mid)
+            card = render.next_up_card(night, cands, t, chosen, self.settings.tz, link)
+            await self._upsert_pin("next_up", self.settings.night_channel_id, card)
+            return
 
     async def refresh_library(self) -> None:
         async with self._acquire() as c:

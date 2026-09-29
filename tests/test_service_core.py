@@ -144,3 +144,27 @@ async def test_empty_library_night(pool: asyncpg.Pool) -> None:
     night = await svc.create_night(1, NOW + timedelta(days=1, hours=1))
     assert night.message_id is not None
     assert list(gw.messages[night.message_id].reactions) == ["✅", "❔", "❌"]
+
+
+async def test_reaction_failure_is_non_fatal(env) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    gw.fail_next("add_reactions", times=3)
+    night = await svc.create_night(42, NOW + timedelta(days=2))
+    assert night.message_id is not None and night.event_id is not None
+    assert len(gw.pinned) == 1
+    assert any(m.channel_id == 400 for m in gw.messages.values())
+
+
+async def test_many_deleted_cards_no_recursion(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    nights = [await svc.create_night(1, NOW + timedelta(days=i + 1)) for i in range(3)]
+    for n in nights:
+        assert n.message_id is not None
+        gw.delete(n.message_id)
+    await svc.refresh_next_up()
+    async with pool.acquire() as c:
+        rows = await c.fetch("select status from nights order by id")
+    assert [r["status"] for r in rows] == ["cancelled", "cancelled", "cancelled"]
+    pin_mid = next(iter(gw.pinned))
+    embed = gw.messages[pin_mid].embed
+    assert embed is not None and "No game night scheduled" in embed.description
