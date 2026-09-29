@@ -26,5 +26,5 @@ def render_metrics(up: bool, latency: float | None, now: datetime) -> str:
 
 def write_textfile(path: Path, content: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(content)
+    tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, path)

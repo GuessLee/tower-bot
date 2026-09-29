@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from tower_bot.gamenight.service import GameNightService
-
-log = logging.getLogger(__name__)
 
 
 async def tick(
@@ -20,7 +17,13 @@ async def tick(
     except Exception as e:
         await svc.log_error(f"reminders: {e!r}")
 
-    for night in await svc.due_locks(now):
+    try:
+        nights = await svc.due_locks(now)
+    except Exception as e:
+        await svc.log_error(f"lock: {e!r}")
+        nights = []
+
+    for night in nights:
         try:
             await svc.lock_night(night.id)
         except Exception as e:

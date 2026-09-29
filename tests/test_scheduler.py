@@ -1,7 +1,9 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import asyncpg
+import pytest
 
 from tests.fakes import FakeGateway
 from tower_bot.core.clock import FakeClock
@@ -54,7 +56,7 @@ async def test_tick_reports_gave_up_feedback(pool: asyncpg.Pool) -> None:
     assert logs and "feedback #3" in logs[-1].embed.description
 
 
-async def test_tick_lock_isolation(pool: asyncpg.Pool, monkeypatch: any) -> None:
+async def test_tick_lock_isolation(pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch) -> None:
     """One lock_night failure must not skip remaining due nights."""
     gw, clock = FakeGateway(), FakeClock(NOW)
     async with pool.acquire() as c:
@@ -69,7 +71,7 @@ async def test_tick_lock_isolation(pool: asyncpg.Pool, monkeypatch: any) -> None
     # Patch lock_night to fail on the first call, succeed on the second
     call_count = 0
 
-    async def failing_lock_night(night_id: int) -> any:
+    async def failing_lock_night(night_id: int) -> Any:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -90,3 +92,29 @@ async def test_tick_lock_isolation(pool: asyncpg.Pool, monkeypatch: any) -> None
     assert s1 == "open"  # failed to lock
     assert s2 == "locked"  # still locked despite first failure
     assert any(m.channel_id == 400 for m in gw.messages.values())  # error logged
+
+
+async def test_tick_due_locks_failure_doesnt_skip_feedback(
+    pool: asyncpg.Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """due_locks() failure must be logged and not skip feedback_retry."""
+    gw = FakeGateway()
+    svc = GameNightService(pool, gw, S, FakeClock(NOW), retry_sleep=no_sleep)
+
+    feedback_calls: list[datetime] = []
+
+    async def feedback_retry(now: datetime) -> list[str]:
+        feedback_calls.append(now)
+        return []
+
+    async def failing_due_locks(now: datetime) -> list[Any]:
+        raise RuntimeError("database connection lost")
+
+    monkeypatch.setattr(svc, "due_locks", failing_due_locks)
+
+    await tick(svc, NOW, feedback_retry)
+
+    # Both error logged and feedback_retry called (not skipped)
+    assert feedback_calls == [NOW]
+    logs = [m for m in gw.messages.values() if m.channel_id == 400 and m.embed]
+    assert any("lock: RuntimeError" in (m.embed.description or "") for m in logs)
