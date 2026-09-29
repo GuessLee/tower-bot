@@ -119,7 +119,10 @@ async def bot(e2e_db: str) -> AsyncIterator[TowerBot]:
     cfg = load_config(_env())
     pool = await asyncpg.create_pool(cfg.database_url, min_size=1, max_size=4)
     b = TowerBot(cfg, pool)
-    task = asyncio.create_task(b.start(cfg.discord_token))
+    # login() before wait_until_ready(): the ready event only exists after login,
+    # so a bare create_task(start()) races it and raises "not properly initialised".
+    await b.login(cfg.discord_token)
+    task = asyncio.create_task(b.connect())
     try:
         await asyncio.wait_for(b.wait_until_ready(), 60)
         yield b
