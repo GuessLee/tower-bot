@@ -26,19 +26,48 @@ class GitHubIssues:
         self._repo = repo
         self._c = client or httpx.AsyncClient(base_url="https://api.github.com", timeout=15)
 
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
     async def create(self, title: str, body: str, labels: Sequence[str]) -> str:
         r = await self._c.post(
             f"/repos/{self._repo}/issues",
             json={"title": title, "body": body, "labels": list(labels)},
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
+            headers=self._headers(),
         )
         if r.status_code != 201:
             raise GitHubError(f"{r.status_code}: {r.text[:200]}")
         return str(r.json()["html_url"])
+
+    async def find_existing(self, row_id: int) -> str | None:
+        """Best-effort lookup for an issue a previous attempt already filed
+        for this outbox row, keyed on the hidden body marker (see
+        feedback_body). Used only on retries, before POSTing, to avoid
+        double-filing when a prior POST succeeded on GitHub's side but its
+        response never reached us (timeout, connection drop, etc.). Any
+        failure here (network, non-200, unexpected shape) just returns None
+        so the caller falls through to a normal POST; at-least-once filing
+        is acceptable, duplicate-on-every-hiccup is not worth guarding
+        further than this."""
+        query = f'repo:{self._repo} in:body "{_marker_text(row_id)}"'
+        try:
+            r = await self._c.get("/search/issues", params={"q": query}, headers=self._headers())
+        except httpx.HTTPError:
+            return None
+        if r.status_code != 200:
+            return None
+        try:
+            data = r.json()
+            items = data["items"]
+            if data["total_count"] > 0 and items:
+                return str(items[0]["html_url"])
+        except (ValueError, KeyError, IndexError, TypeError):
+            return None
+        return None
 
 
 def _neutralize_mentions(text: str) -> str:
@@ -49,13 +78,21 @@ def _neutralize_mentions(text: str) -> str:
     return text.replace("@", "@\u200b")
 
 
+def _marker_text(row_id: int) -> str:
+    return f"tower-bot-feedback:{row_id}"
+
+
 def feedback_title(text: str) -> str:
     return _neutralize_mentions(f"Feedback (Discord): {' '.join(text.split())[:60]}")
 
 
-def feedback_body(text: str, author: str, channel: str) -> str:
+def feedback_body(text: str, author: str, channel: str, row_id: int) -> str:
+    # The hidden marker lets a later retry find an issue a prior attempt
+    # already filed (see GitHubIssues.find_existing) so it can adopt it
+    # instead of filing a duplicate when a POST's response was lost.
     return _neutralize_mentions(
-        f"{text}\n\n---\nFrom **{author}** in #{channel} via tower-bot `/feedback`."
+        f"{text}\n\n---\nFrom **{author}** in #{channel} via tower-bot `/feedback`.\n"
+        f"<!-- {_marker_text(row_id)} -->"
     )
 
 
@@ -86,10 +123,25 @@ class FeedbackService:
         channel: str,
         labels: Sequence[str],
         now: datetime,
+        *,
+        is_retry: bool,
     ) -> str | None:
+        if is_retry:
+            adopted = await self.gh.find_existing(row_id)
+            if adopted is not None:
+                async with self._acquire() as c:
+                    await c.execute(
+                        "update feedback_outbox set status='filed', issue_url=$2,"
+                        " attempts=attempts+1, last_attempt_at=$3 where id=$1",
+                        row_id,
+                        adopted,
+                        now,
+                    )
+                    await audit(c, None, "feedback_adopted", f"feedback:{row_id}", url=adopted)
+                return adopted
         try:
             url = await self.gh.create(
-                feedback_title(text), feedback_body(text, author, channel), labels
+                feedback_title(text), feedback_body(text, author, channel, row_id), labels
             )
         except (GitHubError, httpx.HTTPError) as e:
             async with self._acquire() as c:
@@ -128,25 +180,58 @@ class FeedbackService:
                 self.labels,
                 now,
             )
-        url = await self._try(row_id, clean, author, channel, self.labels, now)
+        url = await self._try(row_id, clean, author, channel, self.labels, now, is_retry=False)
         return FeedbackResult(url=url, queued=url is None)
 
     async def retry_pending(self, now: datetime) -> list[str]:
+        threshold = now - RETRY_EVERY
         async with self._acquire() as c:
-            rows = await c.fetch(
-                "select * from feedback_outbox where status='pending'"
+            candidates = await c.fetch(
+                "select id, created_at from feedback_outbox where status='pending'"
                 " and (last_attempt_at is null or last_attempt_at <= $1) order by id",
-                now - RETRY_EVERY,
+                threshold,
             )
         gave_up: list[str] = []
-        for r in rows:
-            if now - r["created_at"] > GIVE_UP_AFTER:
+        for cand in candidates:
+            if now - cand["created_at"] > GIVE_UP_AFTER:
+                # Conditional on status='pending' so that if a concurrent
+                # retry_pending() sweep already gave up on (or filed) this
+                # row, we don't report it a second time.
                 async with self._acquire() as c:
-                    await c.execute(
-                        "update feedback_outbox set status='failed' where id=$1", r["id"]
+                    failed = await c.fetchrow(
+                        "update feedback_outbox set status='failed'"
+                        " where id=$1 and status='pending' returning id, author",
+                        cand["id"],
                     )
-                    await audit(c, None, "feedback_gave_up", f"feedback:{r['id']}")
-                gave_up.append(f"feedback #{r['id']} from {r['author']}")
+                    if failed is not None:
+                        await audit(c, None, "feedback_gave_up", f"feedback:{failed['id']}")
+                if failed is not None:
+                    gave_up.append(f"feedback #{failed['id']} from {failed['author']}")
                 continue
-            await self._try(r["id"], r["text"], r["author"], r["channel"], r["labels"], now)
+            # Atomically claim the row before trying it: re-checks status and
+            # the retry-cooldown against the row's *current* state, so an
+            # overlapping retry_pending() sweep that raced us to the same
+            # candidate list gets nothing back here and skips the row instead
+            # of also calling GitHub for it.
+            async with self._acquire() as c:
+                claimed = await c.fetchrow(
+                    "update feedback_outbox set last_attempt_at=$2"
+                    " where id=$1 and status='pending'"
+                    " and (last_attempt_at is null or last_attempt_at <= $3)"
+                    " returning *",
+                    cand["id"],
+                    now,
+                    threshold,
+                )
+            if claimed is None:
+                continue
+            await self._try(
+                claimed["id"],
+                claimed["text"],
+                claimed["author"],
+                claimed["channel"],
+                claimed["labels"],
+                now,
+                is_retry=True,
+            )
         return gave_up
