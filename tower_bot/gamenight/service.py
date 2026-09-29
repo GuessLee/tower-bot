@@ -86,6 +86,11 @@ class GameNightService:
         # repo.py functions take asyncpg.Connection, so we cast at the one call site.
         return cast(AbstractAsyncContextManager[asyncpg.Connection], self.pool.acquire())
 
+    def connection(self) -> AbstractAsyncContextManager[asyncpg.Connection]:
+        """Typed pool connection for callers outside the service (the Discord cog's
+        /games commands), so they do not reach into _acquire or the raw pool."""
+        return self._acquire()
+
     async def _call(self, what: str, fn: Callable[[], Awaitable[T]]) -> T:
         try:
             return await with_retry(fn, sleep=self._sleep)
