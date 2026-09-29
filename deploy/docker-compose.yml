@@ -1,0 +1,20 @@
+name: tower-bot
+services:
+  tower-bot:
+    image: tower-bot:local
+    container_name: tower-bot
+    restart: unless-stopped
+    env_file: /mnt/user/appdata/tower-bot/bot.env
+    environment:
+      DISCORD_TOKEN_FILE: /run/secrets/tower-bot/discord_token
+      DB_PASSWORD_FILE: /run/secrets/tower-bot/db_password
+      GITHUB_TOKEN_FILE: /run/secrets/tower-bot/github_token
+      TEXTFILE_PATH: /textfile/tower_bot.prom
+    volumes:
+      - /mnt/cache/secrets/tower-bot:/run/secrets/tower-bot:ro
+      - /mnt/user/appdata/monitoring/textfile:/textfile
+    networks: [gulag]
+networks:
+  gulag:
+    external: true
+    name: gulag-game-night_gulag-game-night
