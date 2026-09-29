@@ -30,7 +30,7 @@ class ImportReport:
     skipped: int
 
 
-def load_items(path: str) -> list[dict]:  # type: ignore[type-arg]
+def load_items(path: str) -> list[dict[str, object]]:
     """Load items from a JSON file, validating that the root is a list."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
@@ -66,12 +66,14 @@ async def _main(path: str) -> None:
     items = [] if path == "-" else load_items(path)
     cfg = load_config(os.environ)
     pool = await create_pool(cfg.database_url, cfg.db_password)
-    async with pool.acquire() as c:
-        c_conn = cast(asyncpg.Connection, c)
-        await apply_migrations(c_conn)
-        report = await import_legacy(c_conn, items)
-    await pool.close()
-    print(report)
+    try:
+        async with pool.acquire() as c:
+            c_conn = cast(asyncpg.Connection, c)
+            await apply_migrations(c_conn)
+            report = await import_legacy(c_conn, items)
+        print(report)
+    finally:
+        await pool.close()
 
 
 if __name__ == "__main__":
