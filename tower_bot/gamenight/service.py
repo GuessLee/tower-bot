@@ -196,8 +196,11 @@ class GameNightService:
             await repo.update_night(c, night.id, status="cancelled")
             await audit(c, None, "night_card_deleted", f"night:{night.id}")
         if night.event_id is not None:
+            eid = night.event_id
             try:
-                await self.gw.delete_event(self.settings.guild_id, night.event_id)
+                await self._call(
+                    "delete event", lambda: self.gw.delete_event(self.settings.guild_id, eid)
+                )
             except (MessageGone, TransientGatewayError):
                 pass
         await self.log_error(f"Night #{night.id} card was deleted in Discord; marked cancelled.")
@@ -446,11 +449,14 @@ class GameNightService:
         else:
             chosen = choose_winner(t, cands)
         async with self._acquire() as c, c.transaction():
-            locked = await repo.lock_night_if_open(c, night.id, chosen.game.id if chosen else None)
+            locked = await repo.lock_night_if_open(
+                c, night.id, chosen.game.id if chosen else None, night.starts_at
+            )
             if locked is None:
-                # A concurrent cancel/move already changed the status; do not
-                # overwrite it, and do not record a play or audit row for a
-                # lock that lost the race.
+                # A concurrent cancel changed the status, or a concurrent move
+                # changed starts_at (status stays 'open' on a move); either
+                # way, do not overwrite it, and do not record a play or audit
+                # row for a lock that lost the race.
                 return None
             if chosen is not None:
                 await games.record_played(c, chosen.game.id, night.starts_at)
@@ -571,9 +577,12 @@ class GameNightService:
             card = render.poll_card(poll, poll_counts(snap, poll.options), self.settings.tz)
             await self._call("edit poll", lambda: self.gw.edit(poll.channel_id, mid, card))
         except MessageGone:
-            if poll.status == "open":
-                async with self._acquire() as c:
-                    await repo.update_poll(c, poll.id, status="cancelled")
+            # SQL-conditional (not a Python-side poll.status check): poll was
+            # read before the retries above, so its status could be stale by
+            # now; the conditional UPDATE is what actually guards against
+            # overwriting a poll a concurrent pick_poll() just closed.
+            async with self._acquire() as c:
+                await repo.cancel_poll_if_open(c, poll.id)
 
     async def pick_poll(
         self,
@@ -609,7 +618,7 @@ class GameNightService:
             )
         except Exception:
             async with self._acquire() as c:
-                await repo.update_poll(c, poll.id, status="open")
+                await repo.revert_poll_claim(c, poll.id)
             raise
         async with self._acquire() as c:
             await repo.update_poll(c, poll.id, night_id=night.id)

@@ -7,6 +7,7 @@ import pytest
 
 from tests.fakes import FakeGateway
 from tower_bot.core.clock import FakeClock
+from tower_bot.core.gateway import TransientGatewayError
 from tower_bot.gamenight import games
 from tower_bot.gamenight.service import (
     GameNightService,
@@ -269,6 +270,34 @@ async def test_lock_skips_if_night_no_longer_open(env, pool: asyncpg.Pool) -> No
     assert played == 0
 
 
+async def test_lock_skips_if_night_was_moved(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, clock = env
+    n = await svc.create_night(42, NOW + timedelta(days=2))
+    gw.react(n.message_id, "1️⃣", 5)
+    clock.set(n.starts_at)
+    new_time = n.starts_at + timedelta(days=1)
+    real_reactions = gw.reactions
+
+    async def sneaky_reactions(channel_id: int, message_id: int):  # type: ignore[no-untyped-def]
+        # Simulate a concurrent move that lands after lock_night has already
+        # read reactions but before its own transaction commits. status stays
+        # 'open' (move_night does not change it), only starts_at changes.
+        async with pool.acquire() as c:
+            await c.execute("update nights set starts_at=$2 where id=$1", n.id, new_time)
+        return await real_reactions(channel_id, message_id)
+
+    gw.reactions = sneaky_reactions  # type: ignore[method-assign]
+
+    chosen = await svc.lock_night(n.id)
+    assert chosen is None
+    async with pool.acquire() as c:
+        row = await c.fetchrow("select status, starts_at from nights where id=$1", n.id)
+        played = await c.fetchval("select coalesce(sum(times_played), 0) from games")
+    assert row["status"] == "open"  # the concurrent move wins, lock does not lock it
+    assert row["starts_at"] == new_time
+    assert played == 0
+
+
 async def test_reminder_failure_does_not_abort_the_sweep(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
     svc, gw, clock = env
     n1 = await svc.create_night(42, NOW + timedelta(days=2))
@@ -313,3 +342,38 @@ async def test_refresh_poll_does_not_overwrite_picked_status(env, pool: asyncpg.
     async with pool.acquire() as c:
         status = await c.fetchval("select status from polls where id=$1", poll.id)
     assert status == "picked"
+
+
+# --- fix round 2 (review re-check findings) ---------------------------------
+
+
+async def test_pick_poll_reverts_to_open_if_create_night_fails(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    t1 = NOW + timedelta(days=1)
+    t2 = NOW + timedelta(days=2)
+    poll = await svc.create_poll(42, [t1, t2])
+    gw.fail_next("post", times=3)  # exhausts create_night's card-post retries
+    with pytest.raises(TransientGatewayError):
+        await svc.pick_poll(42, [], 1, poll.id)
+    async with pool.acquire() as c:
+        status = await c.fetchval("select status from polls where id=$1", poll.id)
+        count = await c.fetchval("select count(*) from nights")
+    assert status == "open"  # the claim is reverted, not left stuck 'picked'
+    assert count == 0  # create_night's own failure path already deleted the orphan row
+
+
+async def test_deleted_card_survives_delete_event_failure(env, pool: asyncpg.Pool) -> None:  # type: ignore[no-untyped-def]
+    svc, gw, _ = env
+    n = await svc.create_night(42, NOW + timedelta(days=2))
+    gw.delete(n.message_id)
+    gw.fail_next("delete_event", times=3)
+    await svc.refresh_night(n.id)  # must not raise
+    async with pool.acquire() as c:
+        status = await c.fetchval("select status from nights where id=$1", n.id)
+    assert status == "cancelled"
+    logs = [
+        m.embed.description
+        for m in gw.messages.values()
+        if m.channel_id == 400 and m.embed is not None
+    ]
+    assert any("failed after retries" in text for text in logs)  # it was retried and logged

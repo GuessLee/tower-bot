@@ -75,17 +75,20 @@ async def update_night(c: asyncpg.Connection, night_id: int, **fields: Any) -> N
 
 
 async def lock_night_if_open(
-    c: asyncpg.Connection, night_id: int, chosen_game_id: int | None
+    c: asyncpg.Connection, night_id: int, chosen_game_id: int | None, starts_at: datetime
 ) -> Night | None:
-    """Lock a night only if it is still 'open'. Returns None (no row touched)
-    if a concurrent cancel/move already changed its status, so the caller
-    knows not to record a play or write an audit row for a lock that lost
-    the race."""
+    """Lock a night only if it is still 'open' AND still scheduled for the
+    same starts_at the caller read before computing the winner. Returns None
+    (no row touched) if a concurrent cancel changed its status, or a
+    concurrent move changed its starts_at (status stays 'open' on a move, so
+    a status-only check would miss that race), so the caller knows not to
+    record a play or write an audit row for a lock that lost the race."""
     r = await c.fetchrow(
         "update nights set status='locked', chosen_game_id=$2"
-        " where id=$1 and status='open' returning *",
+        " where id=$1 and status='open' and starts_at=$3 returning *",
         night_id,
         chosen_game_id,
+        starts_at,
     )
     return Night.from_row(r) if r else None
 
@@ -228,6 +231,29 @@ async def claim_poll(c: asyncpg.Connection, poll_id: int) -> Poll | None:
     only one of two racing pick_poll() calls can ever create a night."""
     r = await c.fetchrow(
         "update polls set status='picked' where id=$1 and status='open' returning *", poll_id
+    )
+    return await _poll_from_row(c, r) if r else None
+
+
+async def cancel_poll_if_open(c: asyncpg.Connection, poll_id: int) -> Poll | None:
+    """Cancel a poll only if it is still 'open'. Returns None (no row
+    touched) if it was already picked (or cancelled) by a concurrent call, so
+    a poll whose card was deleted after being picked never has its 'picked'
+    status overwritten."""
+    r = await c.fetchrow(
+        "update polls set status='cancelled' where id=$1 and status='open' returning *", poll_id
+    )
+    return await _poll_from_row(c, r) if r else None
+
+
+async def revert_poll_claim(c: asyncpg.Connection, poll_id: int) -> Poll | None:
+    """Revert a claimed poll back to 'open' after create_night failed.
+    Guarded on status='picked' and night_id is null so this can never revert
+    a poll that already has a night attached to it."""
+    r = await c.fetchrow(
+        "update polls set status='open'"
+        " where id=$1 and status='picked' and night_id is null returning *",
+        poll_id,
     )
     return await _poll_from_row(c, r) if r else None
 
