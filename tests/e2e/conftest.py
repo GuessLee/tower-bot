@@ -61,26 +61,45 @@ def embed_text(message: dict[str, Any]) -> str:
 class Driver:
     """A second bot account acting as 'friends' via raw REST."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, reader_token: str) -> None:
         self.c = httpx.AsyncClient(
             base_url=API, headers={"Authorization": f"Bot {token}"}, timeout=20
         )
+        # Discord strips embeds from other users' messages for bots without the
+        # privileged Message Content intent, so the driver reads cards with the
+        # tower-bot token (the card's author) instead. Reactions stay the driver's.
+        self.reader = httpx.AsyncClient(
+            base_url=API, headers={"Authorization": f"Bot {reader_token}"}, timeout=20
+        )
+
+    async def aclose(self) -> None:
+        await self.c.aclose()
+        await self.reader.aclose()
+
+    async def _send(self, method: str, url: str) -> httpx.Response:
+        """One REST call, waiting out 429s (reactions are limited to ~4/s per channel)."""
+        for _ in range(10):
+            r = await self.c.request(method, url)
+            if r.status_code != 429:
+                return r
+            await asyncio.sleep(float(r.json().get("retry_after", 1)) + 0.1)
+        return r
 
     async def me(self) -> int:
         return int((await self.c.get("/users/@me")).json()["id"])
 
     async def react(self, channel: int, message: int, emoji: str) -> None:
-        r = await self.c.put(f"/channels/{channel}/messages/{message}/reactions/{quote(emoji)}/@me")
+        url = f"/channels/{channel}/messages/{message}/reactions/{quote(emoji)}/@me"
+        r = await self._send("PUT", url)
         assert r.status_code == 204, r.text
 
     async def unreact(self, channel: int, message: int, emoji: str) -> None:
-        r = await self.c.delete(
-            f"/channels/{channel}/messages/{message}/reactions/{quote(emoji)}/@me"
-        )
+        url = f"/channels/{channel}/messages/{message}/reactions/{quote(emoji)}/@me"
+        r = await self._send("DELETE", url)
         assert r.status_code == 204, r.text
 
     async def message(self, channel: int, message: int) -> dict[str, Any]:
-        r = await self.c.get(f"/channels/{channel}/messages/{message}")
+        r = await self.reader.get(f"/channels/{channel}/messages/{message}")
         return dict(r.json()) if r.status_code == 200 else {}
 
     async def wait_embed(self, channel: int, message: int, needle: str, seconds: float = 20) -> str:
@@ -140,8 +159,8 @@ async def bot(e2e_db: str) -> AsyncIterator[TowerBot]:
 
 @pytest.fixture
 async def driver() -> AsyncIterator[Driver]:
-    d = Driver(os.environ["E2E_DRIVER_TOKEN"])
+    d = Driver(os.environ["E2E_DRIVER_TOKEN"], os.environ["E2E_BOT_TOKEN"])
     try:
         yield d
     finally:
-        await d.c.aclose()
+        await d.aclose()
