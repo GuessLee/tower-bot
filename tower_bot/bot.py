@@ -8,7 +8,7 @@ from discord.ext import commands, tasks
 
 from tower_bot.config import Config
 from tower_bot.core.clock import Clock, SystemClock
-from tower_bot.core.discord_gateway import DiscordGateway
+from tower_bot.core.discord_gateway import USERS_ONLY, DiscordGateway
 from tower_bot.core.heartbeat import render_metrics, write_textfile
 from tower_bot.gamenight.cog import GameNightCog
 from tower_bot.gamenight.feedback import FeedbackService, GitHubIssues
@@ -26,7 +26,11 @@ class TowerBot(commands.Bot):
         intents = discord.Intents.none()
         intents.guilds = True
         intents.guild_reactions = True
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
+        # Fail safe for every send, including interaction replies: never @everyone/@here
+        # or role pings, and never ping the author of a replied-to message.
+        super().__init__(
+            command_prefix=commands.when_mentioned, intents=intents, allowed_mentions=USERS_ONLY
+        )
         self.cfg, self.pool, self.clock = cfg, pool, clock or SystemClock()
         self._started = False
 

@@ -171,7 +171,10 @@ class GameNightCog(commands.Cog):
         option="Option number on the poll", poll_id="Defaults to latest open poll"
     )
     async def pick(
-        self, itx: discord.Interaction[TowerBot], option: int, poll_id: int | None = None
+        self,
+        itx: discord.Interaction[TowerBot],
+        option: app_commands.Range[int, 1, 5],
+        poll_id: int | None = None,
     ) -> None:
         await itx.response.defer(ephemeral=True, thinking=True)
         night = await self.svc.pick_poll(itx.user.id, _roles(itx.user), option, poll_id)
@@ -201,7 +204,10 @@ class GameNightCog(commands.Cog):
         number="Candidate number on the card (1-4)", night_id="Defaults to the next game night"
     )
     async def game(
-        self, itx: discord.Interaction[TowerBot], number: int, night_id: int | None = None
+        self,
+        itx: discord.Interaction[TowerBot],
+        number: app_commands.Range[int, 1, 4],
+        night_id: int | None = None,
     ) -> None:
         await itx.response.defer(ephemeral=True, thinking=True)
         pick = await self.svc.override_game(itx.user.id, _roles(itx.user), number, night_id)
@@ -210,7 +216,9 @@ class GameNightCog(commands.Cog):
     # --- /games ---------------------------------------------------------
     @games_group.command(name="suggest", description="Add a game to the library")
     @app_commands.describe(name="The game's name")
-    async def suggest(self, itx: discord.Interaction[TowerBot], name: str) -> None:
+    async def suggest(
+        self, itx: discord.Interaction[TowerBot], name: app_commands.Range[str, 1, 80]
+    ) -> None:
         await itx.response.defer(ephemeral=True, thinking=True)
         async with self.svc.connection() as c:
             r = await games.suggest(c, name, itx.user.id)
@@ -252,7 +260,9 @@ class GameNightCog(commands.Cog):
     # --- /feedback ------------------------------------------------------
     @app_commands.command(name="feedback", description="Send feedback or report a problem")
     @app_commands.describe(text="What's on your mind (up to 2000 characters)")
-    async def feedback(self, itx: discord.Interaction[TowerBot], text: str) -> None:
+    async def feedback(
+        self, itx: discord.Interaction[TowerBot], text: app_commands.Range[str, 1, 2000]
+    ) -> None:
         await itx.response.defer(ephemeral=True, thinking=True)
         channel = getattr(itx.channel, "name", None) or "dm"
         r = await self.fb.submit(text, itx.user.display_name, channel, self.svc.clock.now())
@@ -272,11 +282,27 @@ class GameNightCog(commands.Cog):
     async def on_raw_reaction_remove(self, p: discord.RawReactionActionEvent) -> None:
         self._on_reaction(p)
 
+    @commands.Cog.listener()
+    async def on_raw_reaction_clear(self, p: discord.RawReactionClearEvent) -> None:
+        self._on_clear(p)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_clear_emoji(self, p: discord.RawReactionClearEmojiEvent) -> None:
+        self._on_clear(p)
+
+    def _watched(self, guild_id: int | None, channel_id: int) -> bool:
+        s = self.svc.settings
+        return guild_id == s.guild_id and channel_id == s.night_channel_id
+
     def _on_reaction(self, p: discord.RawReactionActionEvent) -> None:
-        if p.guild_id != self.svc.settings.guild_id:
-            return
         if self.bot.user is not None and p.user_id == self.bot.user.id:
             return
-        if p.channel_id != self.svc.settings.night_channel_id:
-            return
-        self.debouncer.poke(p.message_id)
+        if self._watched(p.guild_id, p.channel_id):
+            self.debouncer.poke(p.message_id)
+
+    def _on_clear(
+        self, p: discord.RawReactionClearEvent | discord.RawReactionClearEmojiEvent
+    ) -> None:
+        # A moderator wiping reactions changes the tally too; no user to filter here.
+        if self._watched(p.guild_id, p.channel_id):
+            self.debouncer.poke(p.message_id)

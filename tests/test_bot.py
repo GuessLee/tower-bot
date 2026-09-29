@@ -70,6 +70,30 @@ async def test_bot_builds_and_registers_commands() -> None:
     assert {c.name for c in gm.commands} == {"suggest", "list", "remove"}
     assert bot.intents.guild_reactions and bot.intents.guilds
     assert not bot.intents.message_content and not bot.intents.members
+    am = bot.allowed_mentions
+    assert am is not None
+    assert (am.everyone, am.roles, am.users, am.replied_user) == (False, False, True, False)
+
+
+def _option(bot: TowerBot, path: str, name: str) -> dict[str, Any]:
+    group, _, sub = path.partition(" ")
+    cmd = bot.tree.get_command(group)
+    assert cmd is not None
+    d = cmd.to_dict(bot.tree)
+    opts = next(o for o in d["options"] if o["name"] == sub)["options"] if sub else d["options"]
+    return cast(dict[str, Any], next(o for o in opts if o["name"] == name))
+
+
+async def test_option_ranges() -> None:
+    bot, _, _ = await _bot_with_cog()
+    game = _option(bot, "gamenight game", "number")
+    assert (game["min_value"], game["max_value"]) == (1, 4)
+    pick = _option(bot, "gamenight pick", "option")
+    assert (pick["min_value"], pick["max_value"]) == (1, 5)
+    text = _option(bot, "feedback", "text")
+    assert (text["min_length"], text["max_length"]) == (1, 2000)
+    name = _option(bot, "games suggest", "name")
+    assert (name["min_length"], name["max_length"]) == (1, 80)
 
 
 def _payload(guild: int | None, channel: int, user: int, message: int = 77) -> Any:
@@ -87,6 +111,22 @@ async def test_reaction_filter() -> None:
     cog._on_reaction(_payload(GUILD, OTHER_CH, 5, message=4))  # other channel
     cog._on_reaction(_payload(GUILD, NIGHT_CH, ME, message=5))  # the bot's own reaction
     assert poked == [1]
+
+
+async def test_reaction_clear_filter() -> None:
+    _, cog, _ = await _bot_with_cog()
+    poked: list[int] = []
+    cog.debouncer = cast(Any, SimpleNamespace(poke=poked.append))
+
+    def ev(guild: int | None, channel: int, message: int) -> Any:
+        return SimpleNamespace(guild_id=guild, channel_id=channel, message_id=message, emoji="x")
+
+    for handler in (cog.on_raw_reaction_clear, cog.on_raw_reaction_clear_emoji):
+        await handler(ev(GUILD, NIGHT_CH, 1))  # counts
+        await handler(ev(2, NIGHT_CH, 2))  # other guild
+        await handler(ev(None, NIGHT_CH, 3))  # DM
+        await handler(ev(GUILD, OTHER_CH, 4))  # other channel
+    assert poked == [1, 1]
 
 
 def _itx(done: bool) -> Any:

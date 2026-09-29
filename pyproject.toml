@@ -27,6 +27,10 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = ["e2e: needs real Discord staging guild + tokens"]
 addopts = "-m 'not e2e'"
+filterwarnings = [
+  # discord.py imports audioop (voice support we do not use); deprecated in 3.12, not our code.
+  "ignore:'audioop' is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
