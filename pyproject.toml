@@ -11,6 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "mypy>=1.11", "asyncpg-stubs>=0.29"]
+demo = ["playwright>=1.47", "pillow>=10.1"]
 
 [build-system]
 requires = ["setuptools>=69"]
