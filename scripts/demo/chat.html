@@ -1,0 +1,225 @@
+<!doctype html>
+<!-- Discord-style chat pane used by make_demo.py. Not a real Discord client:
+     make_demo.py feeds it one JSON state per frame via window.render(). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>tower-bot demo</title>
+<style>
+  :root {
+    --bg: #1a1a1e; --panel: #222327; --embed: #242429; --line: #2e2e34;
+    --text: #dbdee1; --bright: #f2f3f5; --muted: #949ba4; --blurple: #5865f2;
+    --link: #7cc3ff; --chip: #27272d; --chip-line: #36363d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  body {
+    display: flex; flex-direction: column; color: var(--text);
+    font: 16px/1.375 "gg sans", "Segoe UI", "Helvetica Neue", Arial, "Segoe UI Emoji", sans-serif;
+  }
+  b, strong { color: var(--bright); font-weight: 600; }
+  code { background: #2b2c31; border: 1px solid #36373d; border-radius: 4px; padding: 0 4px;
+         font: 14px/1.3 Consolas, "Cascadia Mono", monospace; }
+
+  #banner { background: #111114; border-bottom: 1px solid var(--line); padding: 12px 18px 13px;
+            border-left: 5px solid var(--blurple); flex: none; min-height: 76px; }
+  #banner .t { font-size: 13px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+               color: #a5adfa; }
+  #banner .c { font-size: 19px; font-weight: 600; color: var(--bright); margin-top: 3px; }
+
+  #head { flex: none; height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 16px;
+          border-bottom: 1px solid var(--line); font-weight: 600; color: var(--bright); }
+  #head .hash { color: var(--muted); font-size: 24px; font-weight: 400; line-height: 1; }
+  #head .topic { color: var(--muted); font-weight: 400; font-size: 14px; margin-left: 8px;
+                 padding-left: 12px; border-left: 1px solid var(--line); }
+
+  #chat { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: flex-end;
+          overflow: hidden; padding: 0 0 6px; }
+  .msg { position: relative; padding: 2px 48px 2px 72px; margin-top: 17px; flex: none; }
+  .msg.eph { background: rgba(88, 101, 242, .07); border-left: 2px solid var(--blurple);
+             padding-top: 4px; padding-bottom: 6px; padding-left: 70px; }
+  .msg.fresh { background: rgba(255, 255, 255, .025); }
+  .avatar { position: absolute; left: 16px; top: 4px; width: 40px; height: 40px; border-radius: 50%;
+            display: grid; place-items: center; font-size: 20px; color: #fff; font-weight: 600; }
+  .msg.has-ctx .avatar { top: 26px; }
+  .ctx { font-size: 14px; color: var(--muted); margin-bottom: 2px; display: flex; align-items: center;
+         gap: 5px; position: relative; white-space: nowrap; }
+  .ctx::before { content: ""; position: absolute; left: -36px; top: 9px; width: 30px; height: 12px;
+                 border-left: 2px solid #4e5058; border-top: 2px solid #4e5058;
+                 border-top-left-radius: 6px; }
+  .ctx .mini { width: 16px; height: 16px; border-radius: 50%; display: inline-grid;
+               place-items: center; font-size: 9px; color: #fff; flex: none; }
+  .ctx .cmd { color: var(--link); font-weight: 500; }
+  .who { font-weight: 600; color: var(--bright); }
+  .app { background: var(--blurple); color: #fff; font-size: 11px; font-weight: 700;
+         border-radius: 4px; padding: 1px 5px; margin-left: 5px; vertical-align: 1px; }
+  .time { color: var(--muted); font-size: 12px; margin-left: 7px; }
+  .body { white-space: normal; overflow-wrap: anywhere; }
+  .edited { color: var(--muted); font-size: 10px; margin-top: 3px; }
+  .only { color: var(--muted); font-size: 12px; margin-top: 5px; }
+  .only span { color: var(--link); }
+
+  .mention { background: rgba(88, 101, 242, .3); color: #c9cdfb; border-radius: 4px;
+             padding: 0 3px; font-weight: 500; }
+  a { color: var(--link); text-decoration: none; }
+
+  .embed { margin-top: 5px; background: var(--embed); border: 1px solid var(--line);
+           border-left: 4px solid var(--blurple); border-radius: 5px; padding: 11px 16px 13px 13px;
+           max-width: 520px; font-size: 14px; line-height: 1.3; }
+  .embed .et { font-size: 16px; font-weight: 600; color: var(--bright); line-height: 1.375; }
+  .embed .et.link { color: var(--link); }
+  .embed .ed { margin-top: 7px; line-height: 1.35; }
+  .embed .ef { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 9px; }
+  .embed .f { grid-column: span 3; min-width: 0; }
+  .embed .f.inline { grid-column: span 1; }
+  .embed .fn { font-weight: 600; color: var(--bright); margin-bottom: 2px; }
+  .embed .fv { line-height: 1.4; }
+  .embed .foot { margin-top: 9px; font-size: 12px; color: var(--muted); font-weight: 500; }
+
+  .rx { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .chip { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 28px;
+          padding: 0 8px; background: var(--chip); border: 1px solid var(--chip-line);
+          border-radius: 9px; font-size: 15px; }
+  .chip .n { font-size: 14px; font-weight: 600; color: #b5bac1; min-width: 9px; text-align: center; }
+  .chip.me { background: rgba(88, 101, 242, .22); border-color: var(--blurple); }
+  .chip.me .n { color: #dee0fc; }
+  .chip.bump { border-color: #6d6f78; }
+  .chip.bump .n { color: var(--bright); }
+
+  .btns { display: flex; gap: 8px; margin-top: 8px; }
+  .btn { position: relative; height: 32px; padding: 0 16px; border-radius: 8px; color: #fff;
+         font-size: 14px; font-weight: 500; display: inline-flex; align-items: center; }
+  .btn.primary { background: var(--blurple); }
+  .btn.secondary { background: #3b3d44; }
+
+  .hot { outline: 3px solid rgba(255, 255, 255, .9); outline-offset: 2px; }
+  .hot::after { content: ""; position: absolute; right: -15px; bottom: -19px; width: 22px;
+                height: 26px; z-index: 5;
+                background: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 26"><path d="M2 1.5v19l5-4.6 3.4 8 3.4-1.5-3.4-7.8H17z" fill="white" stroke="black" stroke-width="1.6" stroke-linejoin="round"/></svg>') no-repeat; }
+
+  #dock { flex: none; position: relative; padding: 0 16px 18px; }
+  #popup { position: absolute; left: 16px; right: 16px; bottom: 76px; background: #1f2024;
+           border: 1px solid #35363c; border-radius: 9px; padding: 8px; z-index: 4;
+           box-shadow: 0 8px 22px rgba(0, 0, 0, .55); }
+  #popup .ph { font-size: 12px; font-weight: 700; color: var(--muted); padding: 2px 8px 6px;
+               text-transform: uppercase; letter-spacing: .03em; }
+  #popup .row { display: flex; align-items: baseline; gap: 10px; padding: 7px 8px;
+                border-radius: 5px; }
+  #popup .row.sel { background: #33343a; }
+  #popup .rn { font-weight: 600; color: var(--bright); white-space: nowrap; }
+  #popup .ro { color: var(--muted); font-size: 14px; white-space: nowrap; }
+  #popup .rd { color: var(--muted); font-size: 14px; flex: 1; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; }
+  #popup .hint { padding: 5px 8px; font-size: 14px; }
+  #popup .hint b { margin-right: 8px; }
+  #box { min-height: 52px; background: var(--panel); border: 1px solid #303136; border-radius: 9px;
+         display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 9px 14px; }
+  #box .plus { color: var(--muted); font-size: 24px; line-height: 1; margin-right: 8px; }
+  #box .ph { color: #6d6f78; }
+  #box .slash { color: var(--bright); font-weight: 500; white-space: pre; }
+  #box .opt { display: inline-flex; border-radius: 5px; overflow: hidden;
+              border: 1px solid #45464d; font-size: 15px; }
+  #box .opt.cur { border-color: var(--blurple); }
+  #box .opt .on { background: #2d2e33; color: var(--muted); padding: 2px 7px; }
+  #box .opt .ov { background: #17171a; color: var(--bright); padding: 2px 7px; min-width: 10px;
+                  white-space: pre; }
+  .caret { display: inline-block; width: 2px; height: 20px; background: var(--bright);
+           vertical-align: -4px; margin-left: 1px; }
+</style>
+</head>
+<body>
+<div id="banner"><div class="t"></div><div class="c"></div></div>
+<div id="head"><span class="hash">#</span><span class="name"></span><span class="topic"></span></div>
+<div id="chat"></div>
+<div id="dock"><div id="popup" hidden></div><div id="box"></div></div>
+
+<script>
+const esc = s => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let S = null;
+
+// The small Discord markdown subset the bot actually emits.
+function md(text) {
+  let h = esc(text || "");
+  h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
+  h = h.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  h = h.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a>$1</a>');
+  h = h.replace(/https:\/\/discord\.com\/channels\/\d+\/(\d+)\/\d+/g,
+    (_, ch) => `<span class="mention"># ${esc(S.channels[ch] || "channel")} › 💬</span>`);
+  h = h.replace(/&lt;@(\d+)&gt;/g, (_, id) => `<span class="mention">@${esc(S.users[id]?.name || id)}</span>`);
+  h = h.replace(/&lt;#(\d+)&gt;/g, (_, id) => `<span class="mention"># ${esc(S.channels[id] || id)}</span>`);
+  h = h.replace(/(^|\n)- /g, "$1• ");
+  return h.replace(/\n/g, "<br>");
+}
+
+const hex = n => "#" + n.toString(16).padStart(6, "0");
+const avatar = (u, cls) => `<div class="${cls}" style="background:${u.color}">${esc(u.glyph)}</div>`;
+
+function embed(e) {
+  const fields = e.fields.length
+    ? `<div class="ef">${e.fields.map(f =>
+        `<div class="f${f.inline ? " inline" : ""}"><div class="fn">${md(f.name)}</div><div class="fv">${md(f.value)}</div></div>`).join("")}</div>`
+    : "";
+  return `<div class="embed" style="border-left-color:${hex(e.color)}">
+    <div class="et${e.url ? " link" : ""}">${md(e.title)}</div>
+    ${e.description ? `<div class="ed">${md(e.description)}</div>` : ""}${fields}
+    ${e.footer ? `<div class="foot">${esc(e.footer)}</div>` : ""}</div>`;
+}
+
+function item(m) {
+  const bot = S.bot;
+  let ctx = "";
+  if (m.kind === "ephemeral") {
+    const u = S.users[m.user];
+    ctx = `<div class="ctx">${avatar(u, "mini")}<b>${esc(u.name)}</b> used <span class="cmd">${esc(m.command)}</span></div>`;
+  } else if (m.reply) {
+    ctx = `<div class="ctx">${avatar(bot, "mini")}<b>${esc(bot.name)}</b><span>${esc(m.reply)}</span></div>`;
+  }
+  const rx = (m.reactions || []).length
+    ? `<div class="rx">${m.reactions.map(r =>
+        `<span class="chip${r.me ? " me" : ""}${r.bump ? " bump" : ""}${r.hot ? " hot" : ""}">${r.emoji}<span class="n">${r.count}</span></span>`).join("")}</div>`
+    : "";
+  const btns = (m.buttons || []).length
+    ? `<div class="btns">${m.buttons.map(b => `<span class="btn ${b.style}${b.hot ? " hot" : ""}">${esc(b.label)}</span>`).join("")}</div>`
+    : "";
+  return `<div class="msg${m.kind === "ephemeral" ? " eph" : ""}${ctx ? " has-ctx" : ""}${m.fresh ? " fresh" : ""}">
+    ${ctx}${avatar(bot, "avatar")}
+    <div><span class="who">${esc(bot.name)}</span><span class="app">APP</span><span class="time">${esc(m.time)}</span></div>
+    ${m.content ? `<div class="body">${md(m.content)}</div>` : ""}
+    ${m.embed ? embed(m.embed) : ""}${m.edited ? '<div class="edited">(edited)</div>' : ""}${btns}${rx}
+    ${m.kind === "ephemeral" ? '<div class="only">👁 Only you can see this • <span>Dismiss message</span></div>' : ""}
+  </div>`;
+}
+
+function composer(c, channel) {
+  const caret = '<span class="caret"></span>';
+  if (!c) return `<span class="plus">⊕</span><span class="ph">Message #${esc(channel)}</span>`;
+  if (c.typed !== undefined) return `<span class="plus">⊕</span><span class="slash">${esc(c.typed)}${caret}</span>`;
+  const opts = c.options.map((o, i) => {
+    const cur = i === c.options.length - 1 && c.editing;
+    return `<span class="opt${cur ? " cur" : ""}"><span class="on">${esc(o.name)}</span><span class="ov">${esc(o.value)}${cur ? caret : ""}</span></span>`;
+  }).join("");
+  return `<span class="plus">⊕</span><span class="slash">${esc(c.command)}</span>${opts}${c.editing ? "" : caret}`;
+}
+
+function popup(p) {
+  if (!p) return "";
+  if (p.hint) return `<div class="hint"><b>${esc(p.hint.name)}</b>${esc(p.hint.description)}</div>`;
+  return `<div class="ph">Commands matching ${esc(p.query)}</div>` + p.rows.map(r =>
+    `<div class="row${r.selected ? " sel" : ""}"><span class="rn">${esc(r.name)}</span><span class="ro">${esc(r.options)}</span><span class="rd">${esc(r.description)}</span></div>`).join("");
+}
+
+window.render = state => {
+  S = state;
+  document.querySelector("#banner .t").textContent = state.title;
+  document.querySelector("#banner .c").textContent = state.caption;
+  document.querySelector("#head .name").textContent = state.channel;
+  document.querySelector("#head .topic").textContent = state.topic;
+  document.getElementById("chat").innerHTML = state.items.map(item).join("");
+  document.getElementById("box").innerHTML = composer(state.composer, state.channel);
+  const pop = document.getElementById("popup");
+  pop.hidden = !state.popup;
+  pop.innerHTML = popup(state.popup);
+};
+</script>
+</body>
+</html>
