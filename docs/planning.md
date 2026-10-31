@@ -21,6 +21,13 @@ Nothing in a repo file, issue or PR cites a path outside this repository, such a
 
 Never report "live" or "done" from a merge alone.
 
+## Planning never drifts
+
+- Every change that adds or changes scope updates its planning record in the same PR. At this level that record is the tracking issue: update its outcome and scope as they change.
+- New capability that fits no existing tracking issue gets its own tracking issue before or with the PR.
+- Every issue and PR links back to what it comes from with a `Planning:` line: the parent tracking issue, or `Planning: none - bounded maintenance`.
+- If the repo later moves to the full level (a roadmap and PRDs), the line becomes `Planning: PRD-<n> S<n>` or the roadmap item, and the PR updates the PRD and roadmap too.
+
 ## Closing issues
 
 - Use `Closes #<n>` (or a Development-sidebar link, which also closes on merge) only when merging finishes the issue.
@@ -29,7 +36,7 @@ Never report "live" or "done" from a merge alone.
 ## Filing an issue
 
 - **Outcome**: what should be true when it is done.
-- **Planning link**: a related issue, or "none - bounded maintenance".
+- **Planning**: the parent tracking issue, or "none - bounded maintenance". Required.
 - **Scope**: what is in, and what is not.
 - **Verification target**: where it is checked (tests, the running bot).
 - **Operational impact**: deploy, config, data or permission changes, or none.

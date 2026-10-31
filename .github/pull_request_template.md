@@ -1,6 +1,6 @@
 # Planning link
 Issue: #<n>. Use "Closes #<n>" only if merging this PR finishes the issue; otherwise "Refs #<n>" and say what is left.
-Plan: "none - bounded maintenance", or the issue that holds the plan.
+Planning: <parent tracking issue>, or "none - bounded maintenance". Required. If this PR adds or changes scope, it updates that record too.
 
 # Changes
 <What changed and why, in a few lines.>
